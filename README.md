@@ -16,6 +16,7 @@ needs no wearable sensors and no handheld controller.**
 [![TensorFlow][TensorFlow-badge]][TensorFlow-url]
 [![YOLOv8][YOLO-badge]][YOLO-url]
 [![DJI Tello][Tello-badge]][Tello-url]
+[![License: AGPL-3.0][License-badge]][License-url]
 
 [Getting Started](#getting-started) ·
 [Usage](#usage) ·
@@ -61,6 +62,7 @@ needs no wearable sensors and no handheld controller.**
     <li><a href="#gesture-model">Gesture Model</a></li>
     <li><a href="#project-structure">Project Structure</a></li>
     <li><a href="#troubleshooting">Troubleshooting</a></li>
+    <li><a href="#license">License</a></li>
     <li><a href="#acknowledgments">Acknowledgments</a></li>
   </ol>
 </details>
@@ -161,7 +163,7 @@ All commands are for **PowerShell** and run from the project root.
    ```
 2. **Get the code.**
    ```powershell
-   gh repo clone mujios/journalism-drone D:\Projects\journalism-drone
+   git clone https://github.com/Sheikh-Muhammad-Mujtaba/Autonomous-Drone-with-Hand-Gesture-Control.git D:\Projects\journalism-drone
    cd D:\Projects\journalism-drone
    ```
 3. **Create the environment.** `uv sync` reads `.python-version` (3.10), downloads that Python if
@@ -452,6 +454,23 @@ notebook, and exported models are in
 
 ---
 
+<!-- LICENSE -->
+## License
+
+Copyright © 2026 Sheikh Muhammad Mujtaba.
+
+Distributed under the **GNU Affero General Public License v3.0**. See [LICENSE](LICENSE) for the
+full text.
+
+This project uses [Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics) and ships its
+`yolov8s.pt` weights, both licensed under AGPL-3.0, so the project uses the same license. In
+short, you may use, modify, and share it. However, if you distribute it or offer it as a network
+service, you must release your source code under AGPL-3.0 too.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+---
+
 <!-- ACKNOWLEDGMENTS -->
 ## Acknowledgments
 
@@ -477,3 +496,5 @@ notebook, and exported models are in
 [YOLO-url]: https://docs.ultralytics.com/
 [Tello-badge]: https://img.shields.io/badge/DJI-Tello-000000?style=for-the-badge&logo=dji&logoColor=white
 [Tello-url]: https://www.ryzerobotics.com/tello
+[License-badge]: https://img.shields.io/badge/License-AGPL--3.0-A42E2B?style=for-the-badge
+[License-url]: LICENSE
