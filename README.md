@@ -62,6 +62,7 @@ needs no wearable sensors and no handheld controller.**
     <li><a href="#gesture-model">Gesture Model</a></li>
     <li><a href="#project-structure">Project Structure</a></li>
     <li><a href="#troubleshooting">Troubleshooting</a></li>
+    <li><a href="#author">Author</a></li>
     <li><a href="#license">License</a></li>
     <li><a href="#acknowledgments">Acknowledgments</a></li>
   </ol>
@@ -449,6 +450,19 @@ notebook, and exported models are in
 | `[Reporter] DISABLED: …` | Add a Gemini, Groq, or OpenRouter key to `.env`, or ignore it (the feature is optional) |
 | `Could not open webcam` | Close other camera apps, or try `--camera 1` |
 | Tello connects but there is no video | Allow Python through the firewall (UDP 11111) and stay close to the drone |
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+---
+
+<!-- AUTHOR -->
+## Author
+
+**Sheikh Muhammad Mujtaba**
+
+- Email: [smujtabaja@gmail.com](mailto:smujtabaja@gmail.com)
+- GitHub: [@Sheikh-Muhammad-Mujtaba](https://github.com/Sheikh-Muhammad-Mujtaba)
+- Project: [Autonomous-Drone-with-Hand-Gesture-Control](https://github.com/Sheikh-Muhammad-Mujtaba/Autonomous-Drone-with-Hand-Gesture-Control)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

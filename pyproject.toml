@@ -3,6 +3,7 @@ name = "journalism-drone"
 version = "0.1.0"
 description = "Autonomous journalism drone with hand-gesture control, reporter tracking and voice commands (DJI Tello)."
 readme = "README.md"
+authors = [{ name = "Sheikh Muhammad Mujtaba", email = "smujtabaja@gmail.com" }]
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 # TensorFlow 2.17 + MediaPipe 0.10.14 (mp.solutions API) are only tested on 3.10.
