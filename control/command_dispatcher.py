@@ -418,3 +418,48 @@ def execute_command(me, state: DispatcherState, command: DroneCommand) -> Option
             state.last_rc_t = now
             return (command.lr, command.fb, command.ud, command.yv)
     return None
+
+
+# A timed voice move with no distance is still capped, never endless.
+VOICE_MOVE_MAX_S = 3.0
+
+
+class VoiceCommandLatch:
+    """Turns queued voice intents into per-tick DroneCommands.
+
+    One-shot actions (takeoff, land, hover, follow, return_home, ...) are
+    applied on exactly ONE tick. They used to be latched with an infinite
+    expiry, so "take off" was re-sent every tick ("Already flying" spam)
+    and a voice "land" would re-land the drone right after a new takeoff.
+    Moves/rotations are held for their calibrated duration (capped at
+    VOICE_MOVE_MAX_S). Any new voice command replaces the held move.
+    """
+
+    def __init__(self) -> None:
+        self._held: Optional[DroneCommand] = None
+        self._held_until = 0.0
+        self._pending_once: Optional[DroneCommand] = None
+
+    def push(self, intent: dict, now: float) -> None:
+        """Register a new voice intent from the voice worker."""
+        command = from_voice(intent)
+        self._held = None
+        self._held_until = 0.0
+        if command.actions:
+            self._pending_once = command
+            return
+        if (command.lr, command.fb, command.ud, command.yv) == (0, 0, 0, 0):
+            return  # nothing to hold (e.g. describe_scene)
+        duration = command.duration_s if command.duration_s is not None else VOICE_MOVE_MAX_S
+        self._held = command
+        self._held_until = now + duration
+
+    def tick(self, now: float) -> Optional[DroneCommand]:
+        """Command to merge this tick, or None."""
+        if self._pending_once is not None:
+            command, self._pending_once = self._pending_once, None
+            return command
+        if self._held is not None and now < self._held_until:
+            return self._held
+        self._held = None
+        return None

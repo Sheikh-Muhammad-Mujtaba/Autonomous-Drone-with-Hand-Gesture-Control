@@ -51,6 +51,10 @@ class RegexParserTest(unittest.TestCase):
         self.assertIsNone(regex_parser("all right"))
         self.assertParsed("alright, take off", {"action": "takeoff"})
 
+    def test_contradictory_takeoff_and_land_hovers(self):
+        # Whisper echoed its old vocabulary prompt during a flight test.
+        self.assertParsed("drone commands take off, land, hover, stop,", {"action": "hover"})
+
     def test_compound_number_words(self):
         self.assertParsed("turn left forty five degrees",
                           {"action": "rotate", "direction": "ccw", "degrees": 45})

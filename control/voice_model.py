@@ -272,13 +272,12 @@ def load_whisper():
     return _whisper_model
 
 
-# Biases Whisper toward the command vocabulary: without it "land" often
-# comes back as "lend"/"plan" and "hover" as "however".
-WHISPER_COMMAND_PROMPT = (
-    "Drone commands: take off, land, hover, stop, emergency, return home, "
-    "follow me, describe the scene, move forward 50 centimeters, move back, "
-    "go left, go right, go up, go down, turn left 90 degrees, turn right."
-)
+# No initial_prompt on purpose: a vocabulary prompt ("take off, land,
+# hover, ...") was read back verbatim on propeller noise in flight tests,
+# turning noise into a real takeoff/land command.
+
+# Segments Whisper itself rates as probably-not-speech are dropped.
+WHISPER_NO_SPEECH_MAX = 0.6
 
 # Phrases Whisper invents from silence/noise. A transcript made only of
 # these is dropped instead of being sent to the parser.
@@ -304,9 +303,10 @@ def transcribe(audio_array, sample_rate=SAMPLE_RATE):
         vad_filter=False,
         condition_on_previous_text=False,
         without_timestamps=True,
-        initial_prompt=WHISPER_COMMAND_PROMPT,
     )
-    text = " ".join(seg.text.strip() for seg in segments).strip().lower()
+    text = " ".join(
+        seg.text.strip() for seg in segments if seg.no_speech_prob <= WHISPER_NO_SPEECH_MAX
+    ).strip().lower()
     if re.sub(r"[^a-z' ]", "", text).strip() in _WHISPER_HALLUCINATIONS:
         return ""
     return text
@@ -397,10 +397,14 @@ def regex_parser(text):
     if not t:
         return None
 
-    if re.search(r"\btake ?off\b|\blift ?off\b|\bstart flying\b|\blaunch\b", t):
+    wants_takeoff = re.search(r"\btake ?off\b|\blift ?off\b|\bstart flying\b|\blaunch\b", t)
+    wants_land = re.search(r"\bland\b|\btouch ?down\b|\bcome down\b", t) and "return" not in t
+    if wants_takeoff and wants_land:
+        # Contradictory (e.g. Whisper echoing a list of commands): hold still.
+        return {"action": "hover"}
+    if wants_takeoff:
         return {"action": "takeoff"}
-
-    if re.search(r"\bland\b|\btouch ?down\b|\bcome down\b", t) and "return" not in t:
+    if wants_land:
         return {"action": "land"}
 
     if re.search(

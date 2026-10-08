@@ -55,10 +55,10 @@ from config import (
 )
 from control.command_dispatcher import (
     DispatcherState,
+    VoiceCommandLatch,
     execute_command,
     from_gesture,
     from_keyboard,
-    from_voice,
     latch_gesture,
     merge_commands,
     safe_land,
@@ -206,8 +206,7 @@ def run(args):
     voice_worker = None
     reporter_worker = None
     reporter_toggle = _ReporterToggle()
-    _latched_voice_cmd = None
-    _voice_latch_until = 0.0
+    voice_latch = VoiceCommandLatch()
 
     try:
         timing_sums = {
@@ -322,29 +321,15 @@ def run(args):
             ges_cmd = from_gesture(held_gesture)
             command = merge_commands(kb_cmd, ges_cmd)
 
-            # Drain voice command queue (non-blocking — never blocks loop).
+            # Drain voice commands (non-blocking). One-shot actions apply on
+            # one tick only; moves are held for their calibrated duration.
             try:
-                voice_intent = voice_command_queue.get_nowait()
-                voice_cmd = from_voice(voice_intent)
-                action_name = (voice_intent.get("action") or "").lower()
-                if action_name in ("hover",):
-                    _latched_voice_cmd = None
-                    _voice_latch_until = 0.0
-                else:
-                    _latched_voice_cmd = voice_cmd
-                    if voice_cmd.duration_s is not None:
-                        _voice_latch_until = time.perf_counter() + voice_cmd.duration_s
-                    else:
-                        _voice_latch_until = float('inf')
+                voice_latch.push(voice_command_queue.get_nowait(), time.perf_counter())
             except queue.Empty:
                 pass
-
-            if _latched_voice_cmd is not None:
-                if time.perf_counter() < _voice_latch_until:
-                    command = merge_commands(command, _latched_voice_cmd)
-                else:
-                    _latched_voice_cmd = None
-                    _voice_latch_until = 0.0
+            voice_cmd = voice_latch.tick(time.perf_counter())
+            if voice_cmd is not None:
+                command = merge_commands(command, voice_cmd)
 
             sent_rc = execute_command(me, dispatcher_state, command)
             if sent_rc is not None:

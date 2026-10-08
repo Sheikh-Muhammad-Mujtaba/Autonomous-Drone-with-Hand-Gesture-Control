@@ -9,7 +9,7 @@ PositionTracker.update().
 import cv2
 import numpy as np
 
-from config import FACE_CASCADE_PATH
+from config import DEBUG_TIMING, FACE_CASCADE_PATH
 
 fbRange = [4000, 6000]
 
@@ -81,6 +81,7 @@ def trackFace(info, w, pid, pError):
         error = 0
 
     sent_lr, sent_fb, sent_ud, sent_yv = 0, fb, 0, speed
-    print("Fb", fb, "ud", 0, "yaw", speed)
+    if DEBUG_TIMING:  # 30 prints/s stalls the Windows console + OpenCV
+        print("Fb", fb, "ud", 0, "yaw", speed)
     _drone.send_rc_control(sent_lr, sent_fb, sent_ud, sent_yv)
     return (sent_lr, sent_fb, sent_ud, sent_yv, error)
