@@ -37,7 +37,12 @@ import time
 
 import cv2
 
-from config import YOLO_MODEL_PATH
+from config import (
+    REPORTER_IMAGE_SIZE,
+    REPORTER_MAX_FPS,
+    REPORTER_TORCH_THREADS,
+    YOLO_MODEL_PATH,
+)
 
 
 # --------------------------------------------------------------------------
@@ -49,7 +54,7 @@ DEVICE = "cpu"
 
 CONFIDENCE = 0.35
 IOU = 0.50
-IMAGE_SIZE = 640
+IMAGE_SIZE = REPORTER_IMAGE_SIZE  # video_tracking.py uses 640; see config.py
 
 VLM_INTERVAL_SECONDS = 2.0
 MIN_VLM_CONFIDENCE = 0.70
@@ -182,6 +187,10 @@ class ReporterTracker:
             )
 
         print("[Reporter] Loading YOLO model...")
+        # Leave CPU cores for MediaPipe pose/hands: torch defaults to every
+        # core, which doubled gesture latency while YOLO ran.
+        import torch
+        torch.set_num_threads(REPORTER_TORCH_THREADS)
         self._yolo = YOLO(YOLO_MODEL)
 
         self._Image = Image
@@ -343,12 +352,17 @@ class ReporterTracker:
             if frame is None:
                 self._stop.wait(0.005)
                 continue
+            t0 = time.monotonic()
             try:
                 self._process_frame(frame)
             except Exception as exc:
                 # A YOLO/VLM hiccup must never kill the worker silently.
                 print(f"[Reporter] worker error: {exc}")
                 time.sleep(0.05)
+            # Rate cap: back-to-back CPU YOLO starves the pose/hand models.
+            spare = (1.0 / REPORTER_MAX_FPS) - (time.monotonic() - t0)
+            if spare > 0:
+                self._stop.wait(spare)
 
     def _process_frame(self, frame):
         # Same YOLO + ByteTrack call as video_tracking.py (person only).

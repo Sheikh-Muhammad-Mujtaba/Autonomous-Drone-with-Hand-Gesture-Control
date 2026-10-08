@@ -9,6 +9,7 @@ import cv2
 from control.voice_model import (
     describe_scene,
     listen_for_utterance_vad,
+    load_whisper,
     resolve_command,
     speak,
     transcribe,
@@ -58,9 +59,15 @@ class VoiceWorker:
         return not self._stop.is_set()
 
     def _run(self):
+        try:
+            load_whisper()  # off the main thread: start-up does not wait on it
+        except Exception as exc:
+            print(f"[voice] DISABLED — Whisper failed to load: {exc}")
+            return
         while not self._stop.is_set():
             audio = listen_for_utterance_vad(
-                person_present_fn=self._person_present
+                person_present_fn=self._person_present,
+                should_stop_fn=self._stop.is_set,
             )
             if self._stop.is_set():
                 break

@@ -37,7 +37,6 @@ from config import (
     DEBUG_TIMING,
     DISPLAY_H,
     DISPLAY_W,
-    GESTURE_CROP_SIZE,
     TARGET_FPS,
     TIMING_EVERY,
 )
@@ -51,10 +50,11 @@ from control.command_dispatcher import (
     merge_commands,
     safe_land,
 )
+from control.gesture_debouncer import NO_GESTURE, GestureDebouncer
 from control.position_map import PositionMapRenderer
 from control.position_tracker import PositionTracker, set_abort_key_source
 from core.face_tracking import findFace, set_drone, trackFace
-from core.gesture_worker import GestureWorker
+from core.gesture_worker import GestureWorker, hand_crop_from_raw
 from core.pose_worker import PoseWorker
 from core.video import LowLatencyFrameRead
 from core.voice_worker import VoiceWorker
@@ -84,19 +84,6 @@ frame_read = LowLatencyFrameRead(me.get_udp_video_address())
 set_drone(me)  # trackFace() sends its own RC — give it the drone handle
 set_abort_key_source(gui)  # "x" aborts return-home via this window
 
-label_map = {
-    'A': 'stop',
-    'B': 'up',
-    'C': 'down',
-    'D': 'left',
-    'E': 'right',
-    'F': 'flip',
-    'G': 'turn left',
-    'H': 'turn right',
-    'I': 'move backward',
-    'J': 'move farward'
-}
-
 dispatcher_state = DispatcherState()
 tracker = PositionTracker()
 dispatcher_state.tracker = tracker
@@ -106,18 +93,9 @@ voice_command_queue = queue.Queue()
 voice_stop_event = threading.Event()
 
 
-gesture1 = "None"
+gesture1 = NO_GESTURE
+gesture_debouncer = GestureDebouncer()
 pError = 0
-gesture_u = 0
-gesture_s = 0
-gesture_d = 0
-gesture_l = 0
-gesture_r = 0
-gesture_tr = 0
-gesture_tl = 0
-gesture_f = 0
-gesture_mf = 0
-gesture_mb = 0
 
 w, h = DISPLAY_W, DISPLAY_H
 
@@ -265,125 +243,15 @@ try:
                     hand_bbox, w, h
                 )
             if hand_allowed:
-                x1, y1, x2, y2 = hand_bbox
-                hand_crop = img[y1:y2, x1:x2].copy()
-                fr1 = cv2.resize(hand_crop, (GESTURE_CROP_SIZE, GESTURE_CROP_SIZE))
-                gesture_worker.submit_crop(fr1)
+                crop, crop_box, raw_size = hand_crop_from_raw(raw, hand_bbox, (w, h))
+                gesture_worker.submit_crop(crop, crop_box, raw_size)
 
         seq, gesture, processed_frame = gesture_worker.latest()
-        new_gesture_result = seq != last_gesture_seq
-        if new_gesture_result:
-            last_gesture_seq = seq
-
-        if new_gesture_result and gesture in ("move farward", "flip", "up", "stop", "down", "left",
-                       "right", "turn left", "turn right", "move backward"):
-            if gesture == "up":
-                gesture_u += 1
-                gesture_mf = 0  # FIX: was a no-op line before, now actually resets
-                gesture_d = 0
-                gesture_tr = 0
-                gesture_mb = 0
-                gesture_tl = 0
-                gesture_l = 0
-                gesture_r = 0
-                if gesture_u >= 5 and gesture_u <= 10:
-                    gesture1 = gesture
-                    if gesture_u >= 10:
-                        gesture_u = 0
-            if gesture == "flip":
-                gesture_f += 1
-                if gesture_f >= 20:
-                    gesture1 = gesture
-                    gesture_f = 0
-            if gesture == "stop":
-                gesture_s += 1
-                if gesture_s >= 20:
-                    gesture1 = gesture
-                    gesture_s = 0
-            if gesture == "down":
-                gesture_d += 1
-                if gesture_d >= 5 and gesture_d <= 10:
-                    gesture1 = gesture
-                    if gesture_d >= 10:
-                        gesture_d = 0
-            if gesture == "move farward":
-                gesture_mf += 1
-                gesture_u = 0
-                gesture_d = 0
-                gesture_tr = 0
-                gesture_mb = 0
-                gesture_tl = 0
-                gesture_l = 0
-                gesture_r = 0
-                if gesture_mf>=5 and gesture_mf<=10:
-                    gesture1 = gesture
-                    if gesture_mf >= 10:
-                        gesture_mf = 0
-            if gesture == "move backward":
-                gesture_mb += 1
-                gesture_u = 0
-                gesture_d = 0
-                gesture_tr = 0
-                gesture_mf = 0
-                gesture_tl = 0
-                gesture_l = 0
-                gesture_r = 0
-                if gesture_mb >= 5 and gesture_mb <= 10:
-                    gesture1 = gesture
-                    if gesture_mb >= 10:
-                        gesture_mb = 0
-            if gesture == "left":
-                gesture_l += 1
-                gesture_mb = 0
-                gesture_u = 0
-                gesture_d = 0
-                gesture_tr = 0
-                gesture_mf = 0
-                gesture_tl = 0
-                gesture_r = 0
-                if gesture_l >= 5 and gesture_l <= 10:
-                    gesture1 = gesture
-                    if gesture_l >= 10:
-                        gesture_l = 0
-            if gesture == "right":
-                gesture_r += 1
-                gesture_l = 0
-                gesture_mb = 0
-                gesture_u = 0
-                gesture_d = 0
-                gesture_tr = 0
-                gesture_mf = 0
-                gesture_tl = 0
-                if gesture_r >= 5 and gesture_r <= 10:
-                    gesture1 = gesture
-                    if gesture_r >= 10:
-                        gesture_r = 0
-            if gesture == "turn left":
-                gesture_tl += 1
-                gesture_d = 0
-                gesture_tr = 0
-                gesture_mf = 0
-                gesture_mb = 0
-                gesture_u = 0
-                gesture_l = 0
-                gesture_r = 0
-                if gesture_tl >= 5 and gesture_tl <= 10:
-                    gesture1 = gesture
-                    if gesture_tl == 10:
-                        gesture_tl = 0
-            if gesture == "turn right":
-                gesture_tr += 1
-                gesture_d = 0
-                gesture_u = 0
-                gesture_l = 0
-                gesture_r = 0
-                gesture_tl = 0
-                gesture_mf = 0
-                gesture_mb = 0
-                if gesture_tr >= 5 and gesture_tr <= 10:
-                    gesture1 = gesture
-                    if gesture_tr >= 10:
-                        gesture_tr = 0
+        if hand_bbox is None or not hand_allowed:
+            gesture_debouncer.reset()
+        elif seq != last_gesture_seq:
+            gesture1 = gesture_debouncer.update(gesture, loop_t0)
+        last_gesture_seq = seq
 
         t0 = time.perf_counter()
         kb_cmd = from_keyboard(gui)
@@ -542,7 +410,7 @@ try:
                 timing_sums = {k: 0.0 for k in timing_sums}
                 timing_n = 0
 
-        gesture1 = "None"
+        gesture1 = NO_GESTURE
 
 finally:
     # FIX (safety): always attempt a clean shutdown, even after a crash/error

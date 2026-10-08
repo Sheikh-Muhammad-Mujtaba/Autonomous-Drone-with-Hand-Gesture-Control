@@ -53,7 +53,9 @@ load_dotenv()
 # --------------------------------------------------------------------------
 SAMPLE_RATE = 16000
 RECORD_SECONDS = 4          # length of each listen window
-WHISPER_MODEL_SIZE = "small"  # "tiny"/"small" for speed, "medium" for better accuracy
+# "tiny"/"base"/"small" for speed, "medium" for accuracy (~3x slower on CPU).
+# Override without editing code: set WHISPER_MODEL_SIZE=medium in .env.
+WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small")
 WHISPER_DEVICE = "cpu"        # change to "cuda" if you have a GPU set up for it
 WHISPER_COMPUTE_TYPE = "int8"  # good CPU speed/accuracy tradeoff
 
@@ -100,9 +102,11 @@ TTS_ENABLED = True  # set False to skip speaking the description aloud
 # --------------------------------------------------------------------------
 VAD_FRAME_MS = 30                # webrtcvad requires 10/20/30ms frames
 VAD_AGGRESSIVENESS = 2           # 0 (permissive) to 3 (aggressive filtering)
-VAD_SILENCE_MS_TO_STOP = 800     # stop recording after this much silence
-VAD_MIN_SPEECH_MS_TO_START = 150 # ignore tiny blips/coughs
-VAD_MAX_UTTERANCE_SECONDS = 12   # hard cap so a stuck-open mic can't hang forever
+VAD_PREROLL_MS = 300             # audio kept from before the trigger (word onsets)
+VAD_MIN_SPEECH_MS_TO_START = 150 # voiced audio inside the pre-roll that starts recording
+VAD_SILENCE_MS_TO_STOP = 600     # stop recording after this much silence
+VAD_MIN_UTTERANCE_SPEECH_MS = 200  # drop clicks/coughs shorter than this
+VAD_MAX_UTTERANCE_SECONDS = 8    # hard cap so a stuck-open mic can't hang forever
 
 # --------------------------------------------------------------------------
 # 1. AUDIO CAPTURE
@@ -137,26 +141,34 @@ def _default_person_present():
     return True
 
 
+def _never_stop():
+    return False
+
+
 def listen_for_utterance_vad(person_present_fn=_default_person_present,
-                              sample_rate=SAMPLE_RATE):
+                              sample_rate=SAMPLE_RATE,
+                              should_stop_fn=_never_stop):
     """
     Continuously streams mic audio and uses webrtcvad to detect natural
     speech start/stop, like ChatGPT's voice mode — no wake word, no fixed
     window. Only actively listens while person_present_fn() returns True.
 
-    Returns a float32 numpy array of the captured utterance, or None if
-    person_present_fn() never returned True (caller should just loop again).
+    Recording starts once VAD_MIN_SPEECH_MS_TO_START of voiced audio is
+    seen inside the last VAD_PREROLL_MS (so one-word commands such as
+    "land" trigger), and stops after VAD_SILENCE_MS_TO_STOP of silence.
+
+    Returns a float32 numpy array of the captured utterance, or None when
+    nothing usable was heard or should_stop_fn() returned True.
     """
     frame_len = int(sample_rate * VAD_FRAME_MS / 1000)  # samples per frame
-    ring_buffer = collections.deque(
-        maxlen=int(VAD_SILENCE_MS_TO_STOP / VAD_FRAME_MS)
-    )
+    preroll = collections.deque(maxlen=max(1, VAD_PREROLL_MS // VAD_FRAME_MS))
+    start_frames = max(1, VAD_MIN_SPEECH_MS_TO_START // VAD_FRAME_MS)
+    max_frames = int(VAD_MAX_UTTERANCE_SECONDS * 1000 / VAD_FRAME_MS)
 
     frames_collected = []
     triggered = False
-    speech_ms = 0
-    max_frames = int(VAD_MAX_UTTERANCE_SECONDS * 1000 / VAD_FRAME_MS)
-    frame_count = 0
+    silence_ms = 0
+    voiced_ms = 0
 
     audio_q = queue.Queue()
 
@@ -166,7 +178,7 @@ def listen_for_utterance_vad(person_present_fn=_default_person_present,
     print("\n[vad] waiting for a person + speech...")
     with sd.InputStream(samplerate=sample_rate, channels=1, dtype="int16",
                          blocksize=frame_len, callback=_callback):
-        while True:
+        while not should_stop_fn():
             if not person_present_fn():
                 # Drain queue so it doesn't build up while no one's there.
                 while not audio_q.empty():
@@ -174,35 +186,39 @@ def listen_for_utterance_vad(person_present_fn=_default_person_present,
                 time.sleep(0.1)
                 continue
 
-            frame = audio_q.get()
-            frame_bytes = frame.tobytes()
-            frame_count += 1
-
-            is_speech = _vad.is_speech(frame_bytes, sample_rate)
+            try:
+                frame = audio_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            is_speech = _vad.is_speech(frame.tobytes(), sample_rate)
 
             if not triggered:
-                ring_buffer.append((frame, is_speech))
-                num_voiced = sum(1 for _, s in ring_buffer if s)
-                if num_voiced > 0.6 * ring_buffer.maxlen:
+                preroll.append((frame, is_speech))
+                if sum(1 for _, voiced in preroll if voiced) >= start_frames:
                     triggered = True
                     print("[vad] speech detected, recording...")
-                    frames_collected = [f for f, _ in ring_buffer]
-                    ring_buffer.clear()
+                    frames_collected = [f for f, _ in preroll]
+                    voiced_ms = sum(VAD_FRAME_MS for _, v in preroll if v)
+                    preroll.clear()
+                continue
+
+            frames_collected.append(frame)
+            if is_speech:
+                silence_ms = 0
+                voiced_ms += VAD_FRAME_MS
             else:
-                frames_collected.append(frame)
-                if is_speech:
-                    speech_ms = 0
-                else:
-                    speech_ms += VAD_FRAME_MS
+                silence_ms += VAD_FRAME_MS
 
-                if speech_ms >= VAD_SILENCE_MS_TO_STOP:
-                    print("[vad] silence detected, stopping.")
-                    break
-                if frame_count >= max_frames:
-                    print("[vad] max utterance length reached, stopping.")
-                    break
+            if silence_ms >= VAD_SILENCE_MS_TO_STOP:
+                print("[vad] silence detected, stopping.")
+                break
+            # Counted from the trigger only: idle time before speaking must
+            # not eat into the utterance budget.
+            if len(frames_collected) >= max_frames:
+                print("[vad] max utterance length reached, stopping.")
+                break
 
-    if not frames_collected:
+    if not triggered or voiced_ms < VAD_MIN_UTTERANCE_SPEECH_MS:
         return None
 
     audio_int16 = np.concatenate(frames_collected, axis=0).flatten()
@@ -231,24 +247,68 @@ def _ensure_local_whisper_model(model_dir, repo_id):
     return model_dir
 
 
-print(f"[whisper] loading '{WHISPER_MODEL_SIZE}' model on {WHISPER_DEVICE}...")
-_local_model_path = _ensure_local_whisper_model(WHISPER_MODEL_DIR, WHISPER_REPO_ID)
-_whisper_model = WhisperModel(
-    _local_model_path,
-    device=WHISPER_DEVICE,
-    compute_type=WHISPER_COMPUTE_TYPE,
+_whisper_model = None
+_whisper_lock = threading.Lock()
+
+
+def load_whisper():
+    """Load (once) and return the Whisper model.
+
+    Lazy so importing this module stays cheap; VoiceWorker calls it at the
+    start of its thread, so the multi-second load happens in the background
+    instead of delaying drone start-up.
+    """
+    global _whisper_model
+    with _whisper_lock:
+        if _whisper_model is None:
+            print(f"[whisper] loading '{WHISPER_MODEL_SIZE}' model on {WHISPER_DEVICE}...")
+            model_path = _ensure_local_whisper_model(WHISPER_MODEL_DIR, WHISPER_REPO_ID)
+            _whisper_model = WhisperModel(
+                model_path,
+                device=WHISPER_DEVICE,
+                compute_type=WHISPER_COMPUTE_TYPE,
+            )
+            print(f"[whisper] model ready. (loaded from {model_path})")
+    return _whisper_model
+
+
+# Biases Whisper toward the command vocabulary: without it "land" often
+# comes back as "lend"/"plan" and "hover" as "however".
+WHISPER_COMMAND_PROMPT = (
+    "Drone commands: take off, land, hover, stop, emergency, return home, "
+    "follow me, describe the scene, move forward 50 centimeters, move back, "
+    "go left, go right, go up, go down, turn left 90 degrees, turn right."
 )
-print(f"[whisper] model ready. (loaded from {_local_model_path})")
+
+# Phrases Whisper invents from silence/noise. A transcript made only of
+# these is dropped instead of being sent to the parser.
+_WHISPER_HALLUCINATIONS = frozenset({
+    "", "you", "thank you", "thanks", "thank you very much",
+    "thanks for watching", "thank you for watching", "bye", "okay", "ok",
+    "subtitles by the amara.org community",
+})
 
 
 def transcribe(audio_array, sample_rate=SAMPLE_RATE):
-    """Runs local Whisper on a numpy float32 array. Returns lowercase text."""
-    segments, _info = _whisper_model.transcribe(
+    """Runs local Whisper on a numpy float32 array. Returns lowercase text.
+
+    Tuned for 1-3 second commands that webrtcvad has already trimmed:
+    greedy decoding (beam_size=1) is ~2x faster than the default beam of 5
+    on CPU with no loss on short phrases, and Silero VAD is off because it
+    can clip one-word commands such as "land".
+    """
+    segments, _info = load_whisper().transcribe(
         audio_array,
         language="en",
-        vad_filter=True,  # trims silence, helps short mic clips
+        beam_size=1,
+        vad_filter=False,
+        condition_on_previous_text=False,
+        without_timestamps=True,
+        initial_prompt=WHISPER_COMMAND_PROMPT,
     )
     text = " ".join(seg.text.strip() for seg in segments).strip().lower()
+    if re.sub(r"[^a-z' ]", "", text).strip() in _WHISPER_HALLUCINATIONS:
+        return ""
     return text
 
 
@@ -256,19 +316,73 @@ def transcribe(audio_array, sample_rate=SAMPLE_RATE):
 # 3. REGEX / KEYWORD PARSER  (must cover 100% of rehearsed demo phrases)
 # --------------------------------------------------------------------------
 NUMBER_WORDS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100,
 }
+_NUMBER_RE = r"(\d+(?:\.\d+)?|half|" + "|".join(NUMBER_WORDS) + r")"
+_TENS = ("twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
+_ONES = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+_COMPOUND_RE = re.compile(rf"\b({'|'.join(_TENS)})[ -]({'|'.join(_ONES)})\b")
+
+
+def _join_compound_numbers(text):
+    """ "forty five" -> "45", so it is not read as 40."""
+    return _COMPOUND_RE.sub(
+        lambda m: str(NUMBER_WORDS[m.group(1)] + NUMBER_WORDS[m.group(2)]), text
+    )
+
+# Safety bounds for spoken distances/angles (a misheard "500" must not
+# send the drone across the room).
+MIN_MOVE_DISTANCE_CM, MAX_MOVE_DISTANCE_CM = 10, 300
+MIN_ROTATE_DEGREES, MAX_ROTATE_DEGREES = 5, 360
+
+# Filler words Whisper keeps that would otherwise match a direction
+# ("all right" -> move right) or add noise.
+_FILLER_RE = re.compile(
+    r"\b(all right|alright|right now|okay|ok|please|hey|drone|um+|uh+)\b"
+)
+
+
+def _parse_number(token):
+    if token == "half":
+        return 0.5
+    if token in NUMBER_WORDS:
+        return float(NUMBER_WORDS[token])
+    return float(token)
 
 
 def _extract_number(text, default):
-    match = re.search(r"\b(\d+)\b", text)
-    if match:
-        return int(match.group(1))
-    for word, val in NUMBER_WORDS.items():
-        if word in text:
-            return val
+    """First number in `text` as a word or digits, whole words only.
+
+    The old substring check matched "one" inside "someone" and "ten"
+    inside "listen".
+    """
+    for match in re.finditer(rf"\b{_NUMBER_RE}\b", text):
+        if match.group(1) not in ("a", "an"):  # "a"/"an" only count before a unit
+            return _parse_number(match.group(1))
     return default
+
+
+def _extract_distance_cm(text, default=DEFAULT_MOVE_DISTANCE_CM):
+    """Distance in cm, honouring metres: "two meters" -> 200, "50" -> 50."""
+    unit_re = rf"\b{_NUMBER_RE}\s*(?:a\s+)?(m|meters?|metres?|cm|centimet(?:er|re)s?)\b"
+    match = re.search(unit_re, text)
+    if match:
+        value = _parse_number(match.group(1))
+        if match.group(2).startswith("m"):
+            value *= 100
+    else:
+        value = _extract_number(text, default)
+    return int(min(max(value, MIN_MOVE_DISTANCE_CM), MAX_MOVE_DISTANCE_CM))
+
+
+def _extract_degrees(text, default=DEFAULT_ROTATE_DEGREES):
+    if re.search(r"\baround\b|\bhalf (?:a )?turn\b", text):
+        return 180
+    value = _extract_number(text, default)
+    return int(min(max(value, MIN_ROTATE_DEGREES), MAX_ROTATE_DEGREES))
 
 
 def regex_parser(text):
@@ -276,7 +390,9 @@ def regex_parser(text):
     Fast, offline, deterministic. Returns a command dict or None.
     Extend this list with every phrase you plan to actually say live.
     """
-    t = text.lower().strip()
+    t = _FILLER_RE.sub(" ", text.lower())
+    t = _join_compound_numbers(re.sub(r"[^a-z0-9.' -]", " ", t)).replace("-", " ")
+    t = re.sub(r"\s+", " ", t).strip()
 
     if not t:
         return None
@@ -315,7 +431,7 @@ def regex_parser(text):
 
     # Rotate BEFORE move directions: "turn right" must rotate, not move.
     if re.search(r"\bturn\b|\brotate\b|\bspin\b|\byaw\b", t):
-        degrees = _extract_number(t, DEFAULT_ROTATE_DEGREES)
+        degrees = _extract_degrees(t)
         if re.search(
             r"\bleft\b|\bcounter ?clockwise\b|\bccw\b|\banti ?clockwise\b",
             t,
@@ -346,7 +462,7 @@ def regex_parser(text):
     }
     for keyword, direction in direction_map.items():
         if re.search(rf"\b{keyword}\b", t):
-            distance = _extract_number(t, DEFAULT_MOVE_DISTANCE_CM)
+            distance = _extract_distance_cm(t)
             return {"action": "move", "direction": direction, "distance_cm": distance}
 
     return None  # nothing matched -> fall through to LLM
@@ -357,7 +473,14 @@ def regex_parser(text):
 # --------------------------------------------------------------------------
 _groq_client = None
 if GROQ_API_KEY:
-    _groq_client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL)
+    # Client-side timeout + no retries: the HTTP call itself gives up on
+    # time, so a slow request can never pile up behind the next utterance.
+    _groq_client = OpenAI(
+        api_key=GROQ_API_KEY,
+        base_url=GROQ_BASE_URL,
+        timeout=max(LLM_TIMEOUT_SECONDS, VLM_TIMEOUT_SECONDS),
+        max_retries=0,
+    )
 else:
     print("[warn] GROQ_API_KEY not set — LLM fallback will be skipped.")
 
@@ -386,40 +509,86 @@ def _call_groq(text):
             {"role": "user", "content": f'Phrase: "{text}"'},
         ],
         temperature=0,
+        # gpt-oss is a reasoning model; "low" keeps a one-line intent
+        # extraction well inside LLM_TIMEOUT_SECONDS.
+        reasoning_effort="low",
     )
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```(json)?|```$", "", raw, flags=re.MULTILINE).strip()
-    data = json.loads(raw)
-    if not data or data.get("action") is None:
+    return validate_intent(json.loads(raw))
+
+
+_SIMPLE_ACTIONS = frozenset({
+    "takeoff", "land", "return_home", "hover", "follow", "describe_scene",
+})
+_MOVE_DIRECTIONS = frozenset({"forward", "back", "left", "right", "up", "down"})
+_ROTATE_DIRECTIONS = frozenset({"cw", "ccw"})
+
+
+def _bounded_int(value, default, low, high):
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        number = default
+    return int(min(max(number, low), high))
+
+
+def validate_intent(data):
+    """Return a clean intent dict, or None if `data` is not a valid command.
+
+    LLM output is external input: only whitelisted actions/directions pass,
+    and distances/angles are clamped to the same bounds as the regex path.
+    """
+    if not isinstance(data, dict):
         return None
-    return data
+    action = data.get("action")
+    if action in _SIMPLE_ACTIONS:
+        return {"action": action}
+    direction = data.get("direction")
+    if action == "move" and direction in _MOVE_DIRECTIONS:
+        distance = _bounded_int(data.get("distance_cm"), DEFAULT_MOVE_DISTANCE_CM,
+                                MIN_MOVE_DISTANCE_CM, MAX_MOVE_DISTANCE_CM)
+        return {"action": "move", "direction": direction, "distance_cm": distance}
+    if action == "rotate" and direction in _ROTATE_DIRECTIONS:
+        degrees = _bounded_int(data.get("degrees"), DEFAULT_ROTATE_DEGREES,
+                               MIN_ROTATE_DEGREES, MAX_ROTATE_DEGREES)
+        return {"action": "rotate", "direction": direction, "degrees": degrees}
+    return None
+
+
+# One long-lived pool. A `with ThreadPoolExecutor()` block waits for its
+# worker on exit, so the old per-call pool silently turned every "timeout"
+# into "wait for the full HTTP request anyway".
+_api_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="voice-api"
+)
+
+
+def _run_with_timeout(fn, arg, timeout, tag):
+    """Run fn(arg) on the shared pool; None on timeout/any error. Never raises."""
+    try:
+        future = _api_executor.submit(fn, arg)
+    except RuntimeError as e:
+        # Interpreter is shutting down (user quit mid-utterance).
+        print(f"[{tag}] skipped: {e}")
+        return None
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        print(f"[{tag}] timed out after {timeout}s")
+    except Exception as e:
+        print(f"[{tag}] failed: {e}")
+    return None
 
 
 def llm_parser(text, timeout=LLM_TIMEOUT_SECONDS):
     """
     Runs the Groq call in a background thread with a hard timeout.
     Never raises — returns None on any failure (timeout, network, bad JSON).
-    This is the function you'd later call from a background task so it
-    never blocks the flight control loop.
     """
     if _groq_client is None:
         return None
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        try:
-            future = executor.submit(_call_groq, text)
-        except RuntimeError as e:
-            # Interpreter is shutting down (user quit mid-utterance).
-            print(f"[llm] skipped: {e}")
-            return None
-        try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            print(f"[llm] timed out after {timeout}s")
-            return None
-        except Exception as e:
-            print(f"[llm] failed: {e}")
-            return None
+    return _run_with_timeout(_call_groq, text, timeout, "llm")
 
 
 # --------------------------------------------------------------------------
@@ -495,16 +664,7 @@ def describe_scene(image_path, timeout=VLM_TIMEOUT_SECONDS):
         print(f"[vlm] failed to load image: {e}")
         return None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_call_vlm, image_data_url)
-        try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            print(f"[vlm] timed out after {timeout}s")
-            return None
-        except Exception as e:
-            print(f"[vlm] failed: {e}")
-            return None
+    return _run_with_timeout(_call_vlm, image_data_url, timeout, "vlm")
 
 
 # --------------------------------------------------------------------------

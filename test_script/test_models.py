@@ -208,12 +208,14 @@ def test_face_cascade():
 
 
 def test_voice_pipeline():
-    """Production loads faster-whisper at import time — importing
-    control.voice_model IS the load test. First run downloads the weights
-    into model/faster-whisper-medium/ (one-time, needs internet)."""
+    """Same load path as VoiceWorker: import control.voice_model, then
+    load_whisper(). First run downloads the weights into
+    model/faster-whisper-<size>/ (one-time, needs internet)."""
     try:
         t0 = time.perf_counter()
-        import control.voice_model as vm  # noqa: F401  (import = load)
+        import control.voice_model as vm
+
+        vm.load_whisper()
         load_s = time.perf_counter() - t0
         report(
             "voice pipeline (whisper)",

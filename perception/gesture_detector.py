@@ -29,11 +29,17 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 import pickle
 
-from config import GESTURE_MODEL_PATH, LABEL_ENCODER_PATH
+from config import (
+    GESTURE_CONFIDENCE_THRESHOLD,
+    GESTURE_MODEL_PATH,
+    HAND_DETECTION_CONFIDENCE,
+    HAND_TRACKING_CONFIDENCE,
+    LABEL_ENCODER_PATH,
+)
 
 MODEL_PATH = GESTURE_MODEL_PATH
 ENCODER_PATH = LABEL_ENCODER_PATH
-CONFIDENCE_THRESHOLD = 0.85
+CONFIDENCE_THRESHOLD = GESTURE_CONFIDENCE_THRESHOLD
 
 model = None  # lazy — loaded on first gesture via _ensure_gesture_engine
 le = None  # lazy — loaded on first gesture via _ensure_gesture_engine
@@ -49,6 +55,8 @@ label_map = {
     'H': 'turn right',
     'I': 'move backward',
     'J': 'move farward'
+    # 'Q' (a real flip, only 96 training samples) is deliberately unmapped:
+    # PredictClass reports it as None so it can never drive the drone.
 }
 
 mp_hands = mp.solutions.hands
@@ -75,7 +83,8 @@ def _ensure_gesture_engine():
             le = pickle.load(f)
         hands = mp_hands.Hands(
             max_num_hands=1,
-            min_detection_confidence=0.7,
+            min_detection_confidence=HAND_DETECTION_CONFIDENCE,
+            min_tracking_confidence=HAND_TRACKING_CONFIDENCE,
             model_complexity=0,  # lighter graph; complexity 1 was a large part of the ~28ms
         )
         # Warm up so the first live frame does not pay trace cost.
@@ -96,7 +105,46 @@ def infer_landmarks(sample_landmarks):
     return np.asarray(pred)
 
 
-def PredictClass(frame):
+def _landmark_features(hand_landmarks, crop_box, frame_size):
+    """Flatten 21 landmarks into the (1, 42) x/y vector the model expects.
+
+    The model was trained on landmarks from the WHOLE mirrored webcam frame
+    (see custom_hand_gesture_model_training/collect data.py), where a hand
+    spans ~12% of the width. MediaPipe here runs on a tight hand crop, where
+    the hand fills most of the image — a completely different input range
+    that drove confidence below the threshold. When the crop's position in
+    the original frame is known, map every landmark back into mirrored
+    full-frame coordinates so the model sees the distribution it learned.
+
+    Args:
+        hand_landmarks: MediaPipe landmarks, normalized to the flipped crop.
+        crop_box: (x1, y1, x2, y2) of the crop in the unflipped full frame,
+            in pixels, or None to use crop-relative coordinates.
+        frame_size: (width, height) of the full frame, or None.
+    """
+    pts = np.array([(lm.x, lm.y) for lm in hand_landmarks.landmark], dtype=np.float32)
+    if crop_box is not None and frame_size is not None:
+        x1, y1, x2, y2 = crop_box
+        frame_w, frame_h = frame_size
+        # The crop was mirrored before MediaPipe; in the mirrored full frame
+        # its left edge sits at frame_w - x2.
+        pts[:, 0] = (frame_w - x2 + pts[:, 0] * (x2 - x1)) / frame_w
+        pts[:, 1] = (y1 + pts[:, 1] * (y2 - y1)) / frame_h
+    return pts.reshape(1, -1)
+
+
+def PredictClass(frame, crop_box=None, frame_size=None):
+    """Classify the hand sign in a BGR hand crop.
+
+    Args:
+        frame: BGR hand crop (any size).
+        crop_box: optional (x1, y1, x2, y2) of the crop in the full frame.
+        frame_size: optional (width, height) of the full frame. Pass both
+            so landmarks match the training coordinate space.
+
+    Returns:
+        (gesture or None, crop with landmarks drawn).
+    """
     _ensure_gesture_engine()  # lazy load; first call pays the load cost
 
     frame = cv2.flip(frame, 1)
@@ -107,31 +155,27 @@ def PredictClass(frame):
     last_timing_ms["mediapipe"] = (time.perf_counter() - t0) * 1000.0
     last_timing_ms["inference"] = 0.0
 
-    if result.multi_hand_landmarks:
-        for hand_landmarks in result.multi_hand_landmarks:
-            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+    if not result.multi_hand_landmarks:
+        return None, frame
 
-            landmarks = []
-            for lm in hand_landmarks.landmark:
-                landmarks.extend([lm.x, lm.y])
+    hand_landmarks = result.multi_hand_landmarks[0]  # max_num_hands=1
+    mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+    sample_landmarks = _landmark_features(hand_landmarks, crop_box, frame_size)
 
-            sample_landmarks = np.array(landmarks, dtype=np.float32).reshape(1, -1)
+    t1 = time.perf_counter()
+    prediction = infer_landmarks(sample_landmarks)
+    last_timing_ms["inference"] = (time.perf_counter() - t1) * 1000.0
 
-            t1 = time.perf_counter()
-            prediction = infer_landmarks(sample_landmarks)
-            last_timing_ms["inference"] = (time.perf_counter() - t1) * 1000.0
+    predicted_class = int(np.argmax(prediction))
+    confidence = float(prediction[0][predicted_class])
+    if confidence < CONFIDENCE_THRESHOLD:
+        return None, frame
 
-            predicted_class = np.argmax(prediction)
-            confidence = prediction[0][predicted_class]
+    sign = le.inverse_transform([predicted_class])[0]
+    gesture = label_map.get(sign)
+    if gesture is None:
+        return None, frame
 
-            if confidence < CONFIDENCE_THRESHOLD:
-                return None, frame
-
-            predicted_gesture_old = le.inverse_transform([predicted_class])[0]
-            predicted_gesture_new = label_map.get(predicted_gesture_old, predicted_gesture_old)
-
-            cv2.putText(frame, f"Gesture: {predicted_gesture_new}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        return predicted_gesture_new, frame
-
-    return None, frame
+    cv2.putText(frame, f"{gesture} {confidence:.2f}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    return gesture, frame

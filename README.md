@@ -214,14 +214,20 @@ $env:HF_HUB_DISABLE_XET = "1"   # avoids a download that can stall at 0 bytes on
 uv run python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-small', local_dir=r'model\faster-whisper-small')"
 ```
 
-Choose the size with `WHISPER_MODEL_SIZE` in [control/voice_model.py](control/voice_model.py).
-These timings were measured on a laptop CPU for a 3-second voice command:
+Choose the size with `WHISPER_MODEL_SIZE=<size>` in `.env` (default `small`, see
+[control/voice_model.py](control/voice_model.py)). Whisper always encodes a padded 30-second
+window, so the time per command barely depends on how long you speak:
 
 | Model | Download | Transcribe time | Recommendation |
 |---|---|---|---|
-| `tiny` | 75 MB | ~0.8 s | Fastest; fine for short commands |
-| `small` | 460 MB | ~2.8 s | **Default** — best balance on CPU |
+| `tiny` | 75 MB | ~0.8 s | Fastest; least robust to noise |
+| `base` | 145 MB | ~0.9 s | 3x faster than `small`; got all 7 test commands right on clean audio |
+| `small` | 460 MB | ~2.6 s | **Default**. More robust to propeller noise and accents |
 | `medium` | 1.5 GB | ~8 s | Too slow for live flight without a GPU |
+
+The `base` and `small` timings were measured on an 8-core laptop CPU with `int8`. If voice feels
+slow, try `WHISPER_MODEL_SIZE=base` and check that commands are still recognised over the
+propellers.
 
 ### Dependency Pins
 
@@ -244,6 +250,13 @@ installed, it overwrites the `cv2` module from `opencv-contrib-python` and remov
 `CascadeClassifier`. `pyproject.toml` prevents this with
 `[tool.uv] exclude-dependencies = ["opencv-python"]`. Add new packages with `uv add <package>`,
 never with `pip install`.
+
+**Without uv.** [requirements.txt](requirements.txt) is exported from `uv.lock` with exact
+versions. Install it with `--no-deps`. Otherwise pip pulls in `opencv-python`:
+
+```powershell
+py -3.10 -m pip install --no-deps -r requirements.txt
+```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -277,6 +290,15 @@ RESULT: all 6 checks passed
 ```
 
 A scikit-learn `InconsistentVersionWarning` about `LabelEncoder` is expected and harmless.
+
+### Unit tests
+
+These test the gesture debouncer, the hand-crop geometry, and the voice parser. They need no
+camera, microphone, drone, or API key:
+
+```powershell
+uv run python -m unittest discover -s tests -t .
+```
 
 ### Full webcam demo
 
@@ -367,6 +389,15 @@ Raise a hand to turn gestures on, then make one of the trained signs:
 | **D** | Left | **I** | Move backward |
 | **E** | Right | **J** | Move forward |
 
+Hold a sign steady. A movement starts after 3 matching frames and continues while you hold the
+sign. **Stop** needs 4 frames and **Flip** needs 6. Each fires once per hold, then waits 2 seconds
+before it can fire again. You can change these values under `Gesture recognition` in
+[config.py](config.py).
+
+When the reporter guard is on, gestures only work from the person holding the microphone. An
+**orange** hand box means your hand is up but you are not the reporter. Press `o` to turn the
+guard off.
+
 ### Voice Commands
 
 Voice is always on in `main.py`. Speak naturally, for example:
@@ -374,6 +405,9 @@ Voice is always on in `main.py`. Speak naturally, for example:
 - *"take off"*, *"land"*, *"hover"*
 - *"go up"*, *"turn left"*, *"move forward 50"*, *"move forward two meters"*
 - *"describe the scene"* (the drone answers out loud)
+
+A number on its own is in centimetres. Metres are converted, so *"two meters"* means 200 cm.
+Distances are limited to 10–300 cm and turns to 5–360°.
 
 ### Other Scripts
 
@@ -394,9 +428,14 @@ pixels. This keeps it light enough for real-time inference on a CPU. Data collec
 notebook, and exported models are in
 [custom_hand_gesture_model_training/](custom_hand_gesture_model_training/).
 
+The training data stores landmark positions relative to the **whole mirrored webcam frame**. In
+flight, MediaPipe runs on a crop around the raised hand. The crop is cut from the full-resolution
+frame, and its landmarks are mapped back into whole-frame coordinates so they match the training
+data. On a 3,000-sample check this lifts accuracy from 94–96 % to 98.3 %.
+
 | Metric | Value |
 |---|---|
-| Classes | 10 (A–J) |
+| Classes | 10 (A–J) used in flight, plus Q (a real flip, never sent to the drone) |
 | Validation accuracy | **98.0 %** |
 | Training accuracy | 96.2 % |
 
@@ -421,12 +460,14 @@ notebook, and exported models are in
 ├── ui/                     # Unified tabbed window (tkinter), pygame key module
 ├── scripts/                # Calibration tools + offline video tracking test
 ├── test_script/            # No-drone tests: model check + full webcam demo
+├── tests/                  # Unit tests (debouncer, hand crop, voice parser)
 ├── model/                  # Model weights (gesture .h5, yolov8s.pt, cascade, whisper)
 ├── custom_hand_gesture_model_training/  # Data collection, notebook, exported models
 ├── assets/                 # Architecture diagrams
 ├── custom_bytetrack.yaml   # ByteTrack tracker settings
 ├── pyproject.toml          # Project metadata + dependencies (uv)
 ├── uv.lock                 # Exact, tested dependency set
+├── requirements.txt        # uv.lock exported for pip (install with --no-deps)
 └── .python-version         # Python 3.10 (read by uv)
 ```
 
@@ -448,6 +489,9 @@ notebook, and exported models are in
 | Whisper download stuck at 0 bytes | `$env:HF_HUB_DISABLE_XET = "1"` and try again |
 | Whisper `invalid payload size` / load error | `model.bin` is truncated. Delete the `model\faster-whisper-<size>\` folder and download it again |
 | `[Reporter] DISABLED: …` | Add a Gemini, Groq, or OpenRouter key to `.env`, or ignore it (the feature is optional) |
+| Hand box is orange and gestures do nothing | The reporter guard is on and you are not the identified mic holder. Hold the mic, or press `o` |
+| Gestures lag | Set `DEBUG_TIMING = True` in `config.py` to see the time per stage. To leave more CPU for gestures, lower `REPORTER_TORCH_THREADS` or `REPORTER_IMAGE_SIZE` |
+| Voice is slow | Set `WHISPER_MODEL_SIZE=base` in `.env` (see [Whisper Model](#whisper-model)) |
 | `Could not open webcam` | Close other camera apps, or try `--camera 1` |
 | Tello connects but there is no video | Allow Python through the firewall (UDP 11111) and stay close to the drone |
 
