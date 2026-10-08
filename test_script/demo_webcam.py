@@ -139,6 +139,7 @@ _KEY_TABLE = [
     ("x", "Emergency land"),
     ("r", "Return home"),
     ("f", "Face tracking"),
+    ("o", "Reporter guard"),
     ("Hand up", "Enable gestures"),
 ]
 
@@ -250,7 +251,8 @@ def run(args):
             voice_worker.start()
             print("[Voice] Pipeline ON (mic + whisper + LLM).")
 
-        gui.set_reporter_state(reporter_toggle.enabled)
+        gui.set_reporter_state(reporter_toggle.enabled,
+                               available=reporter_worker is not None)
 
         while True:
             loop_t0 = time.perf_counter()
@@ -308,10 +310,14 @@ def run(args):
             kb_cmd = from_keyboard(gui)
             # O toggles the reporter guard: ON = reporter only, OFF = anyone.
             if gui.getKeyPressedOnce("o"):
-                reporter_toggle.enabled = not reporter_toggle.enabled
-                print("[Reporter] guard " + ("ENABLED" if reporter_toggle.enabled
-                                             else "OFF (bypass — anyone)"))
-                gui.set_reporter_state(reporter_toggle.enabled)
+                if reporter_worker is None:
+                    print("[Reporter] guard unavailable — the tracker did not start "
+                          "(see the [Reporter] DISABLED line at start-up).")
+                else:
+                    reporter_toggle.enabled = not reporter_toggle.enabled
+                    print("[Reporter] guard " + ("ENABLED" if reporter_toggle.enabled
+                                                 else "OFF (bypass — anyone)"))
+                    gui.set_reporter_state(reporter_toggle.enabled)
             held_gesture = latch_gesture(dispatcher_state, gesture1, t0)
             ges_cmd = from_gesture(held_gesture)
             command = merge_commands(kb_cmd, ges_cmd)
@@ -371,7 +377,7 @@ def run(args):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
             # Reporter status badge — bottom-right corner.
             if reporter_worker is None:
-                rep_text, rep_color = "REPORTER: n/a", (128, 128, 128)
+                rep_text, rep_color = "REPORTER: unavailable", (0, 140, 255)
             elif not reporter_toggle.enabled:
                 rep_text, rep_color = "REPORTER: OFF (o)", (128, 128, 128)
             elif reporter_worker.reporter_track_id is None:

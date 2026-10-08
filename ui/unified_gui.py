@@ -55,9 +55,8 @@ class UnifiedGUI:
         )
         self._root.configure(bg="#1e1e1e")
 
-        self._notebook = ttk.Notebook(self._root)
-        self._notebook.pack(fill="both", expand=True)
-
+        # Status bar is packed BEFORE the notebook: Tk gives space in pack
+        # order, so an expanding notebook packed first pushed it off-screen.
         self._status = tk.Label(
             self._root, text="", anchor="w",
             bg="#0f6cbd", fg="#ffffff",
@@ -65,6 +64,9 @@ class UnifiedGUI:
         )
         self._status.pack(side="bottom", fill="x")
         self.set_reporter_state(True)
+
+        self._notebook = ttk.Notebook(self._root)
+        self._notebook.pack(fill="both", expand=True)
 
         self._labels = {}
         self._photos = {}
@@ -208,10 +210,21 @@ class UnifiedGUI:
     def should_quit(self):
         return self._quit
 
-    def set_reporter_state(self, enabled):
-        """Update the bottom status bar (called on init and on O toggles)."""
-        state = "ON (reporter only)" if enabled else "OFF (bypass — anyone)"
+    def set_reporter_state(self, enabled, available=True):
+        """Update the bottom status bar (called on init and on O toggles).
+
+        available=False means the reporter tracker failed to start (usually
+        no VLM API key), so the O toggle has nothing to switch.
+        """
+        if not available:
+            state = "UNAVAILABLE (add GEMINI/GROQ/OPENROUTER key to .env)"
+            bg = "#8a4b00"
+        elif enabled:
+            state, bg = "ON (reporter only)", "#0f6cbd"
+        else:
+            state, bg = "OFF (bypass — anyone)", "#555555"
         self._status.configure(
+            bg=bg,
             text=f"Reporter Guard: {state}    |    "
                  f"O: toggle reporter    Q: land + quit"
         )
